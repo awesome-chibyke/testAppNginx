@@ -1,0 +1,15 @@
+services:
+  nginx:
+    image: nginx:stable-alpine
+    container_name: edge-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./conf.d:/etc/nginx/conf.d:ro
+    restart: unless-stopped
+    networks: [nginx-egde]
+
+networks:
+  nginx-egde:
+    external: true
