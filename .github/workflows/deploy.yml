@@ -94,7 +94,7 @@ jobs:
           }
 
           # The compose file expects this network to already exist.
-          docker network inspect nginx-egde >/dev/null 2>&1 || docker network create nginx-egde
+          docker network inspect nginx-edge >/dev/null 2>&1 || docker network create nginx-edge
 
           docker compose pull
           # Recreates the container only if docker-compose.yml changed.
