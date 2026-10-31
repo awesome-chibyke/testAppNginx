@@ -41,7 +41,7 @@ jobs:
     env:
       DEPLOY_DIR: /edge
       SMOKE_HOST: py.postsville.com
-      SMOKE_PORT: "8003"
+      SMOKE_PORT: "80"
     steps:
       - uses: actions/checkout@v4
 
