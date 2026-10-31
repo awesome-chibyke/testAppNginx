@@ -1,0 +1,131 @@
+name: Deploy edge nginx
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "conf.d/**"
+      - "docker-compose.yml"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    paths:
+      - "conf.d/**"
+      - "docker-compose.yml"
+  workflow_dispatch:
+
+# Never run two deploys against the server at the same time.
+concurrency:
+  group: deploy-edge-nginx
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check compose file
+        run: docker compose config -q
+
+      - name: Check nginx config syntax
+        run: |
+          docker run --rm \
+            -v "$PWD/conf.d:/etc/nginx/conf.d:ro" \
+            nginx:stable-alpine nginx -t
+
+  deploy:
+    needs: validate
+    # Only deploy from main, never from pull requests.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_DIR: /edge
+      SMOKE_HOST: py.postsville.com
+      SMOKE_PORT: "8003"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host deploy
+            HostName ${{ secrets.SSH_HOST }}
+            User ${{ secrets.SSH_USER }}
+            Port ${{ secrets.SSH_PORT || '22' }}
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking yes
+          EOF
+
+      - name: Back up current config on server
+        run: |
+          ssh deploy "mkdir -p '$DEPLOY_DIR' && cd '$DEPLOY_DIR' \
+            && rm -rf .backup && mkdir .backup \
+            && { [ -d conf.d ] && cp -a conf.d .backup/ || true; } \
+            && { [ -f docker-compose.yml ] && cp -a docker-compose.yml .backup/ || true; }"
+
+      - name: Upload files
+        run: |
+          rsync -az --delete \
+            ./conf.d ./docker-compose.yml \
+            deploy:"$DEPLOY_DIR/"
+
+      - name: Apply on server
+        run: |
+          ssh deploy "DEPLOY_DIR='$DEPLOY_DIR' bash -s" <<'EOF'
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+
+          rollback() {
+            echo "!! New config failed, restoring previous version"
+            if [ -d .backup/conf.d ]; then
+              rm -rf conf.d && cp -a .backup/conf.d .
+            fi
+            if [ -f .backup/docker-compose.yml ]; then
+              cp -a .backup/docker-compose.yml .
+            fi
+            docker compose up -d --remove-orphans || true
+            docker exec edge-nginx nginx -s reload || true
+            exit 1
+          }
+
+          # The compose file expects this network to already exist.
+          docker network inspect nginx-egde >/dev/null 2>&1 || docker network create nginx-egde
+
+          docker compose pull
+          # Recreates the container only if docker-compose.yml changed.
+          docker compose up -d --remove-orphans
+
+          # Test the new config inside the running container, then reload
+          # gracefully (no dropped connections).
+          docker exec edge-nginx nginx -t || rollback
+          docker exec edge-nginx nginx -s reload || rollback
+          echo "nginx reloaded"
+          EOF
+
+      - name: Smoke test
+        run: |
+          ssh deploy "SMOKE_HOST='$SMOKE_HOST' SMOKE_PORT='$SMOKE_PORT' bash -s" <<'EOF'
+          set -u
+          code=000
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Host: $SMOKE_HOST" "http://127.0.0.1:$SMOKE_PORT/" || true)
+            echo "attempt $i: HTTP $code"
+            # 2xx/3xx = all good. 502/504 means nginx is up but the app is not.
+            case "$code" in
+              2*|3*) exit 0 ;;
+            esac
+            sleep 3
+          done
+          echo "Smoke test failed (last code: $code)"
+          exit 1
+          EOF
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
