@@ -32,8 +32,10 @@ jobs:
       - name: Create dummy certs
         run: |
           mkdir -p ci-certs
-          openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=ci" \
-            -keyout ci-certs/postsville.key -out ci-certs/postsville.pem
+          for name in postsville philelite; do
+            openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=ci" \
+              -keyout "ci-certs/$name.key" -out "ci-certs/$name.pem"
+          done
 
       - name: Check nginx config syntax
         run: |
@@ -104,7 +106,8 @@ jobs:
 
           # Certs are placed on the server by hand. Stop early if they're
           # missing, otherwise Docker creates an empty root-owned certs/ dir.
-          for f in certs/postsville.pem certs/postsville.key; do
+          for f in certs/postsville.pem certs/postsville.key \
+                   certs/philelite.pem certs/philelite.key; do
             [ -f "$f" ] || { echo "!! Missing $DEPLOY_DIR/$f on the server"; exit 1; }
           done
 
